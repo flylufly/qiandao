@@ -18,17 +18,16 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
 ch = logging.StreamHandler(stream=sys.stdout)
-ch.setLevel(logging.INFO)
 ch.setFormatter(formatter)
 logger.addHandler(ch)
 
 def get_refresh_url(url: str):
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         if response.status_code != 403:
             response.raise_for_status()
 
@@ -49,7 +48,7 @@ def get_refresh_url(url: str):
         return None
 
 def get_url(url: str):
-    resp = requests.get(url)
+    resp = requests.get(url, timeout=10)
     soup = BeautifulSoup(resp.content, 'html.parser')
     
     links = soup.find_all('a', href=True)
@@ -69,7 +68,7 @@ class SouShuBaClient:
         self.questionid = questionid
         self.answer = answer
         self._common_headers = {
-            "Host": f"{ hostname }",
+            "Host": f"{hostname}",
             "Connection": "keep-alive",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
@@ -79,7 +78,7 @@ class SouShuBaClient:
         self.proxies = proxies
 
     def login_form_hash(self):
-        rst = self.session.get(f'https://{self.hostname}/member.php?mod=logging&action=login', verify=False).text
+        rst = self.session.get(f'https://{self.hostname}/member.php?mod=logging&action=login', verify=False, timeout=10).text
         loginhash = re.search(r'<div id="main_messaqge_(.+?)">', rst).group(1)
         formhash = re.search(r'<input type="hidden" name="formhash" value="(.+?)" />', rst).group(1)
         return loginhash, formhash
@@ -89,7 +88,6 @@ class SouShuBaClient:
         loginhash, formhash = self.login_form_hash()
         login_url = f'https://{self.hostname}/member.php?mod=logging&action=login&loginsubmit=yes' \
                     f'&handlekey=register&loginhash={loginhash}&inajax=1'
-
 
         headers = copy(self._common_headers)
         headers["origin"] = f'https://{self.hostname}'
@@ -103,28 +101,34 @@ class SouShuBaClient:
             'answer': self.answer
         }
 
-        resp = self.session.post(login_url, proxies=self.proxies, data=payload, headers=headers, verify=False)
+        resp = self.session.post(login_url, proxies=self.proxies, data=payload, headers=headers, verify=False, timeout=10)
         if resp.status_code == 200:
             logger.info(f'Welcome {self.username}!')
         else:
             raise ValueError('Verify Failed! Check your username and password!')
 
     def credit(self):
-        credit_url = f"https://{self.hostname}/home.php?mod=spacecp&ac=credit&showcredit=1&inajax=1&ajaxtarget=extcreditmenu_menu"
-        credit_rst = self.session.get(credit_url, verify=False).text
+        try:
+            credit_url = f"https://{self.hostname}/home.php?mod=spacecp&ac=credit&showcredit=1&inajax=1&ajaxtarget=extcreditmenu_menu"
+            credit_rst = self.session.get(credit_url, verify=False, timeout=10).text
 
-        # 解析 XML，提取 CDATA
-        root = ET.fromstring(str(credit_rst))
-        cdata_content = root.text
+            root = ET.fromstring(credit_rst.strip())
+            cdata_content = root.text
 
-        # 使用 BeautifulSoup 解析 CDATA 内容
-        cdata_soup = BeautifulSoup(cdata_content, features="lxml")
-        hcredit_2 = cdata_soup.find("span", id="hcredit_2").string
-
-        return hcredit_2
+            cdata_soup = BeautifulSoup(cdata_content, features="lxml")
+            span_tag = cdata_soup.find("span", id="hcredit_2")
+            
+            if span_tag:
+                return span_tag.string.strip()
+            else:
+                logger.warning("未找到银币显示标签 hcredit_2")
+                return "未知"
+        except Exception as e:
+            logger.warning(f"获取银币失败: {e}")
+            return "获取失败"
 
     def space_form_hash(self):
-        rst = self.session.get(f'https://{self.hostname}/home.php', verify=False).text
+        rst = self.session.get(f'https://{self.hostname}/home.php', verify=False, timeout=10).text
         formhash = re.search(r'<input type="hidden" name="formhash" value="(.+?)" />', rst).group(1)
         return formhash
 
@@ -136,7 +140,8 @@ class SouShuBaClient:
         headers["origin"] = f'https://{self.hostname}'
         headers["referer"] = f'https://{self.hostname}/home.php'
 
-        for x in range(5):
+        # 只发 1 条，避免频繁发帖被拦截
+        for x in range(1):
             payload = {
                 "message": "开心赚银币 {0} 次".format(x + 1).encode("GBK"),
                 "addsubmit": "true",
@@ -144,28 +149,38 @@ class SouShuBaClient:
                 "referer": "home.php",
                 "formhash": formhash
             }
-            resp = self.session.post(space_url, proxies=self.proxies, data=payload, headers=headers, verify=False)
-            if re.search("操作成功", resp.text):
-                logger.info(f'{self.username} post {x + 1}nd successfully!')
-                time.sleep(120)
-            else:
-                logger.warning(f'{self.username} post {x + 1}nd failed!')
+            try:
+                resp = self.session.post(space_url, data=payload, headers=headers, verify=False, timeout=15)
+                if "操作成功" in resp.text:
+                    logger.info(f'{self.username} post {x + 1}st successfully!')
+                else:
+                    logger.warning(f'{self.username} post {x + 1}st failed!')
+            except Exception as e:
+                logger.warning(f"发帖异常: {e}")
+            
+            # 不需要再循环，所以去掉 sleep
 
 
 if __name__ == '__main__':
     try:
         redirect_url = get_refresh_url('http://' + os.environ.get('SOUSHUBA_HOSTNAME', 'www.soushu2035.com'))
-        time.sleep(2)
+        time.sleep(3)
         redirect_url2 = get_refresh_url(redirect_url)
         url = get_url(redirect_url2)
         logger.info(f'{url}')
-        client = SouShuBaClient(urlparse(url).hostname,
-                                os.environ.get('SOUSHUBA_USERNAME', "USERNAME"),
-                                os.environ.get('SOUSHUBA_PASSWORD', "PASSWORD"))
+
+        client = SouShuBaClient(
+            urlparse(url).hostname,
+            os.environ.get('SOUSHUBA_USERNAME', "USERNAME"),
+            os.environ.get('SOUSHUBA_PASSWORD', "PASSWORD")
+        )
         client.login()
         client.space()
         credit = client.credit()
         logger.info(f'{client.username} have {credit} coins!')
+        
+        # 正常结束
+        sys.exit(0)
     except Exception as e:
-        logger.error(e)
+        logger.error(f"程序异常: {e}")
         sys.exit(1)
