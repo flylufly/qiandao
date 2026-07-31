@@ -32,7 +32,7 @@ class DiscuzLogin:
     def form_hash(self):
         url = f'https://{self.hostname}/member.php?mod=logging&action=login'
         try:
-            rsp = self.session.get(url, proxies=self.proxies, timeout=10, allow\_redirects=False)
+            rsp = self.session.get(url, proxies=self.proxies, timeout=10, allow_redirects=False)
             rsp.raise_for_status()
             rst = rsp.text
         except Exception as e:
